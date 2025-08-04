@@ -65,13 +65,22 @@ jobs:
 
       - name: Build Application
         run: |
-          wails build --platform ${{ matrix.build.goos }}/${{ matrix.build.goarch }} -o bedu-claim-${{ matrix.build.goos }}-${{ matrix.build.goarch }}${{ matrix.build.goos == 'windows' && '.exe' || '' }}
+          wails build --platform ${{ matrix.build.goos }}/${{ matrix.build.goarch }}
 
-      - name: Upload Artifacts
+      - name: Upload Windows Artifacts
+        if: matrix.build.goos == 'windows'
         uses: actions/upload-artifact@v4
         with:
-          name: bedu-claim-${{ matrix.build.goos }}-${{ matrix.build.goarch }}
-          path: build/bin/bedu-claim-${{ matrix.build.goos }}-${{ matrix.build.goarch }}*
+          name: bedu-claim-windows-${{ matrix.build.goarch }}
+          path: build/bin/bedu-claim.exe
+          retention-days: 30
+
+      - name: Upload macOS Artifacts  
+        if: matrix.build.goos == 'darwin'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bedu-claim-darwin-${{ matrix.build.goarch }}
+          path: build/bin/bedu-claim.app
           retention-days: 30
 
   release:
@@ -95,6 +104,10 @@ jobs:
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: |
+            artifacts/bedu-claim-windows-amd64/bedu-claim.exe
+            artifacts/bedu-claim-windows-arm64/bedu-claim.exe
+            artifacts/bedu-claim-darwin-amd64/bedu-claim.app
+            artifacts/bedu-claim-darwin-arm64/bedu-claim.app
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
