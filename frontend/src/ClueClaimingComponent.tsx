@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { StartAutoClaiming, StopAutoClaiming, GetAutoClaimStatus, GetTaskLabels } from '../wailsjs/go/main/App.js';
+import { StartAutoClaiming, StopAutoClaiming, GetAutoClaimStatus, GetTaskLabels, GetUserInfo } from '../wailsjs/go/main/App.js';
 import { main } from '../wailsjs/go/models.js';
+import { BrowserOpenURL } from '../wailsjs/runtime/runtime.js';
 
 // 类型定义
 type Filter = {
@@ -39,7 +40,9 @@ export default function ClueClaimingComponent() {
   const [userInfoError, setUserInfoError] = useState<string>('');
   const [cookie, setCookie] = useState<string>('');
   const [claimStatus, setClaimStatus] = useState<AutoClaimStatusType | null>(null);
-  
+  const [userInfo, setUserInfo] = useState<{ username: string; avatar: string } | null>(null);
+  const [userInfoLoading, setUserInfoLoading] = useState(false);
+
   const isUserInteractionRef = useRef(false);
   const statusIntervalRef = useRef<number | null>(null);
 
@@ -56,26 +59,68 @@ export default function ClueClaimingComponent() {
     return today.toISOString().slice(0, 16);
   };
 
+  // 显示toast通知
+  const showToast = (message: string, type: 'error' | 'success' | 'warning' | 'info' = 'error') => {
+    const toast = document.createElement('div');
+    toast.className = 'toast toast-end z-50';
+
+    const alertClass = type === 'error' ? 'alert-error' :
+                      type === 'success' ? 'alert-success' :
+                      type === 'warning' ? 'alert-warning' : 'alert-info';
+
+    const iconPath = type === 'error' ? 'M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z' :
+                     type === 'success' ? 'M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z' :
+                     'M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z';
+
+    toast.innerHTML = `
+      <div class="alert ${alertClass}">
+        <svg xmlns="http://www.w3.org/2000/svg" class="stroke-current shrink-0 h-6 w-6" fill="none" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="${iconPath}" />
+        </svg>
+        <span>${message}</span>
+      </div>
+    `;
+
+    document.body.appendChild(toast);
+    setTimeout(() => {
+      if (document.body.contains(toast)) {
+        document.body.removeChild(toast);
+      }
+    }, 4000);
+  };
+
   // 处理任务类型改变
   const handleTaskTypeChange = useCallback(async (taskType: string) => {
     setSelectedTaskType(taskType);
     setIsLoading(true);
+    // 清除旧标签数据和选择
+    setFilterData([]);
+    setSelectedGrade('');
+    setSelectedSubject('');
+    setSelectedType('');
+
     try {
       const response = await GetTaskLabels(taskType, cookie);
+      console.log('GetTaskLabels response:', response);
+
       if (response && response.errno === 0) {
         setFilterData(response.data.filter || []);
         // 设置默认选择
         const stepFilter = response.data.filter?.find((f: Filter) => f.id === 'step');
         const subjectFilter = response.data.filter?.find((f: Filter) => f.id === 'subject');
         const clueTypeFilter = response.data.filter?.find((f: Filter) => f.id === 'clueType');
-        
+
         if (stepFilter?.list && stepFilter.list.length > 0) setSelectedGrade(stepFilter.list[0].name);
         if (subjectFilter?.list && subjectFilter.list.length > 0) setSelectedSubject(subjectFilter.list[0].name);
         if (clueTypeFilter?.list && clueTypeFilter.list.length > 0) setSelectedType(clueTypeFilter.list[0].name);
+      } else {
+        const errorMsg = response?.errmsg || response?.message || response?.msg || response?.error || `错误码: ${response?.errno || '未知'}`;
+        showToast(`获取标签信息失败: ${errorMsg}`, 'error');
       }
     } catch (error) {
       console.error('获取标签数据失败:', error);
-      setUserInfoError('获取筛选数据失败，请检查网络连接');
+      const errorMessage = error instanceof Error ? error.message : '网络连接失败';
+      showToast(`获取标签信息失败: ${errorMessage}`, 'error');
     } finally {
       setIsLoading(false);
     }
@@ -97,7 +142,7 @@ export default function ClueClaimingComponent() {
       const clueTypeItem = clueTypeFilter?.list.find(item => item.name === selectedType);
 
       const config: main.AutoClaimConfig = {
-        // ServerBaseURL 已在Go代码中硬编码为 DefaultServerURL
+        ServerBaseURL: '', // 已在Go代码中硬编码为 DefaultServerURL
         Cookie: cookie,
         TaskType: selectedTaskType,
         ClaimLimit: claimLimit,
@@ -114,16 +159,16 @@ export default function ClueClaimingComponent() {
       };
 
       const response = await StartAutoClaiming(config);
-      
+
       if (response.success) {
         setAutoClaimingActive(true);
         // 开始定期检查状态
         statusIntervalRef.current = setInterval(checkAutoClaimStatus, 2000);
       } else {
-        setUserInfoError(response.message);
+        showToast(`启动失败: ${response.message}`, 'error');
       }
     } catch (error) {
-      setUserInfoError(`启动失败: ${(error as Error).message}`);
+      showToast(`启动失败: ${(error as Error).message}`, 'error');
     } finally {
       setIsClaimingButtonLoading(false);
     }
@@ -165,16 +210,47 @@ export default function ClueClaimingComponent() {
     }
   }, [autoClaimingActive]);
 
+  // 获取用户信息
+  const fetchUserInfo = useCallback(async (cookieValue: string) => {
+    if (!cookieValue.trim()) {
+      setUserInfo(null);
+      return;
+    }
+
+    setUserInfoLoading(true);
+    try {
+      const response = await GetUserInfo(cookieValue);
+      if (response && response.errno === 0) {
+        setUserInfo({
+          username: response.data.userName || '未知用户',
+          avatar: response.data.avatar || ''
+        });
+      } else {
+        setUserInfo(null);
+      }
+    } catch (error) {
+      console.error('获取用户信息失败:', error);
+      setUserInfo(null);
+    } finally {
+      setUserInfoLoading(false);
+    }
+  }, []);
+
   // 组件初始化
   useEffect(() => {
     // 从localStorage加载设置
     const savedCookie = localStorage.getItem('serverCookie') || '';
     const savedStartTime = localStorage.getItem('clueStartTime') || '';
     const savedEndTime = localStorage.getItem('clueEndTime') || '';
-    
+
     setCookie(savedCookie);
     setStartTime(savedStartTime);
     setEndTime(savedEndTime);
+
+    // 如果已有cookie，获取用户信息
+    if (savedCookie) {
+      fetchUserInfo(savedCookie);
+    }
 
     // 清理函数
     return () => {
@@ -182,38 +258,63 @@ export default function ClueClaimingComponent() {
         clearInterval(statusIntervalRef.current);
       }
     };
-  }, []);
+  }, [fetchUserInfo]);
 
-  // 当cookie配置完成后加载标签数据
+  // 当cookie或任务类型变化时加载标签数据
   useEffect(() => {
     if (cookie) {
       handleTaskTypeChange(selectedTaskType);
     }
-  }, [cookie, handleTaskTypeChange]);
+  }, [cookie, selectedTaskType, handleTaskTypeChange]);
 
   return (
     <div className="w-full mt-2">
 
-      {isLoading && (
-        <div className="flex items-center justify-center my-4">
-          <span className="loading loading-spinner loading-sm mr-2"></span>
-          <span className="text-sm">加载筛选数据中...</span>
-        </div>
-      )}
 
       {/* 筛选配置区域 */}
       <div className="flex flex-col gap-4 mb-4">
-        <input
-          type="text"
-          value={cookie}
-          onChange={(e) => {
-            setCookie(e.target.value);
-            localStorage.setItem('serverCookie', e.target.value);
-          }}
-          className="input input-bordered input-sm w-full"
-          placeholder="Cookie"
-        />
-        
+        <div className="form-control">
+          <label className="label py-1 flex justify-between items-center">
+            <span className="label-text text-sm font-medium">百度教育 Cookie</span>
+            <div className="flex items-center gap-2">
+              {userInfo && (
+                <span className="text-xs text-base-content/70">
+                  👤 {userInfo.username}
+                </span>
+              )}
+              {userInfoLoading && (
+                <span className="loading loading-spinner loading-xs"></span>
+              )}
+              <button
+                type="button"
+                className="text-info hover:text-primary btn btn-ghost btn-xs p-0 min-h-0 h-auto"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  BrowserOpenURL('https://www.bilibili.com/video/BV11YVNzGESS/');
+                }}
+                title="查看视频教程"
+                tabIndex={-1}
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M21 12a9 9 0 11-18 0 9 9 0 0118 0zm-9 5.25h.008v.008H12v-.008z" />
+                </svg>
+              </button>
+            </div>
+          </label>
+          <input
+            type="text"
+            value={cookie}
+            onChange={(e) => {
+              const newCookie = e.target.value;
+              setCookie(newCookie);
+              localStorage.setItem('serverCookie', newCookie);
+              fetchUserInfo(newCookie);
+            }}
+            className="input input-bordered input-sm w-full"
+            placeholder="请输入Cookie"
+          />
+        </div>
+
         <div className="form-control">
           <label className="label py-1">
             <span className="label-text text-sm font-medium">任务类型</span>
@@ -223,12 +324,17 @@ export default function ClueClaimingComponent() {
             value={selectedTaskType}
             onChange={(e) => handleTaskTypeChange(e.target.value)}
           >
-            <option value="audittask">审核任务</option>
-            <option value="producetask">生产任务</option>
+            <option value="audittask">审核</option>
+            <option value="producetask">生产</option>
           </select>
         </div>
 
-        {filterData.length > 0 && (
+        {isLoading ? (
+          <div className="flex items-center justify-center py-2">
+            <span className="loading loading-spinner loading-sm mr-2"></span>
+            <span className="text-sm">加载筛选数据中...</span>
+          </div>
+        ) : filterData.length > 0 && (
           <div className="grid grid-cols-3 gap-2">
             {/* 学段选择 */}
             <div className="form-control">
@@ -475,14 +581,6 @@ export default function ClueClaimingComponent() {
       </div>
 
       <div className="mt-4">
-        {userInfoError && (
-          <div className="alert alert-error mb-2 p-2 text-sm">
-            <svg xmlns="http://www.w3.org/2000/svg" className="stroke-current shrink-0 h-4 w-4" fill="none" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            <span>{userInfoError}</span>
-          </div>
-        )}
 
         {/* 显示当前设置概述 */}
         {!autoClaimingActive && (
@@ -504,7 +602,7 @@ export default function ClueClaimingComponent() {
         )}
 
         {/* 状态显示区域 */}
-        {claimStatus && (
+        {autoClaimingActive && claimStatus && (
           <div className="mb-2 p-3 bg-base-100 rounded-lg shadow-sm">
             <div className="flex justify-between items-center">
               <span className="font-medium text-sm">📊 认领状态:</span>
@@ -538,7 +636,7 @@ export default function ClueClaimingComponent() {
           <button
             className="btn btn-primary btn-sm w-full"
             onClick={() => startAutoClaiming()}
-            disabled={isClaimingButtonLoading}
+            disabled={isClaimingButtonLoading || isLoading || filterData.length === 0}
           >
             {isClaimingButtonLoading ? (
               <>

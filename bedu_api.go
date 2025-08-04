@@ -239,6 +239,65 @@ func GetAuditTaskList(options map[string]interface{}, serverBaseURL, cookie stri
 	return &responseData, nil
 }
 
+// UserInfoResponse 表示用户信息的响应
+type UserInfoResponse struct {
+	Errno  int    `json:"errno"`
+	Errmsg string `json:"errmsg"`
+	Data   struct {
+		RoleLinks []string `json:"roleLinks"`
+		RoleNames []string `json:"roleNames"`
+		UserName  string   `json:"userName"`
+		Avatar    string   `json:"avatar"`
+	} `json:"data"`
+}
+
+// GetUserInfo 获取用户信息
+func GetUserInfo(serverBaseURL, cookie string) (*UserInfoResponse, error) {
+	// 构建用户信息API URL
+	apiURL := fmt.Sprintf("%s/edushop/user/common/info", serverBaseURL)
+
+	// 创建请求
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	// 如果cookie存在，设置头部
+	if cookie != "" {
+		req.Header.Set("Cookie", cookie)
+	}
+
+	// 设置User-Agent头部，模拟正常浏览器
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+	// 执行请求
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	// 检查响应状态
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP error! status: %d, URL: %s", resp.StatusCode, apiURL)
+	}
+
+	// 读取并解析响应体
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var responseData UserInfoResponse
+	err = json.Unmarshal(body, &responseData)
+	if err != nil {
+		return nil, err
+	}
+
+	return &responseData, nil
+}
+
 // ClaimAuditTask 认领一个或多个审核任务
 func ClaimAuditTask(taskIDs []string, taskType, serverBaseURL, cookie string) (*ClaimResponse, error) {
 	if taskType == "" {

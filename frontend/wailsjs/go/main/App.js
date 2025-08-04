@@ -10,6 +10,10 @@ export function GetTaskLabels(arg1, arg2) {
   return window['go']['main']['App']['GetTaskLabels'](arg1, arg2);
 }
 
+export function GetUserInfo(arg1) {
+  return window['go']['main']['App']['GetUserInfo'](arg1);
+}
+
 export function Greet(arg1) {
   return window['go']['main']['App']['Greet'](arg1);
 }
