@@ -1,0 +1,115 @@
+name: Build Wails Application
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  release:
+    types: [ published ]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        build:
+          - name: 'Linux AMD64'
+            os: ubuntu-latest
+            platform: linux/amd64
+            goos: linux
+            goarch: amd64
+          - name: 'Linux ARM64'
+            os: ubuntu-latest
+            platform: linux/arm64
+            goos: linux
+            goarch: arm64
+          - name: 'Windows AMD64'
+            os: windows-latest
+            platform: windows/amd64
+            goos: windows
+            goarch: amd64
+          - name: 'Windows ARM64'
+            os: windows-latest
+            platform: windows/arm64
+            goos: windows
+            goarch: arm64
+          - name: 'macOS AMD64'
+            os: macos-latest
+            platform: darwin/amd64
+            goos: darwin
+            goarch: amd64
+          - name: 'macOS ARM64'
+            os: macos-latest
+            platform: darwin/arm64
+            goos: darwin
+            goarch: arm64
+
+    runs-on: ${{ matrix.build.os }}
+    name: Build ${{ matrix.build.name }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies (Ubuntu)
+        if: matrix.build.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev build-essential
+
+      - name: Install Wails
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+      - name: Build Frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Build Application
+        run: |
+          wails build --platform ${{ matrix.build.goos }}/${{ matrix.build.goarch }} -o bedu-claim-${{ matrix.build.goos }}-${{ matrix.build.goarch }}${{ matrix.build.goos == 'windows' && '.exe' || '' }}
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bedu-claim-${{ matrix.build.goos }}-${{ matrix.build.goarch }}
+          path: build/bin/bedu-claim-${{ matrix.build.goos }}-${{ matrix.build.goarch }}*
+          retention-days: 30
+
+  release:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: ubuntu-latest
+    name: Release
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts/
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
