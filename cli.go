@@ -17,7 +17,7 @@ type AutoClaimConfig struct {
 	Cookie        string  // 认证 cookie
 	TaskType      string  // 要认领的任务类型（"audittask" 或 "producetask"）
 	ClaimLimit    int     // 要认领的最大任务数
-	Interval      float64 // 认领尝试之间的间隔（秒），支持小数，最小 0.1 秒
+	Interval      float64 // 认领尝试之间的间隔（秒），支持小数，最小 0.001 秒（1毫秒）
 
 	// 随机页面参数
 	MaxPages int // 请求时的最大随机页码，0 表示禁用随机页码（始终请求第1页）
@@ -37,6 +37,10 @@ type AutoClaimConfig struct {
 	// 发布时间过滤器
 	StartTime string // 开始时间，格式: "2006-01-02 15:04:05"
 	EndTime   string // 结束时间，格式: "2006-01-02 15:04:05"
+
+	// 授权参数
+	AuthType     string `json:"authType"`     // 授权类型："official" 或 "custom"
+	AuthUsername string `json:"authUsername"` // 官方授权用户名
 }
 
 // ClaimStatus 表示自动认领过程的当前状态
@@ -45,17 +49,21 @@ type ClaimStatus struct {
 	LastError        string         // 最后的错误消息（如果有）
 	IsActive         bool           // 自动认领过程是否处于活动状态
 	LastResponse     *ClaimResponse // 来自认领 API 的最后响应
+	ActiveTasks      int            // 当前活跃的任务数
+	AttemptCount     int            // 总尝试次数
 }
 
 // AutoClaimer 处理任务的自动认领
 type AutoClaimer struct {
-	config       AutoClaimConfig
-	status       ClaimStatus
-	cancel       context.CancelFunc
-	mutex        sync.RWMutex
-	actualClaims int
-	attemptCount int
-	logCh        chan string // 用于非阻塞日志记录的通道
+	config        AutoClaimConfig
+	status        ClaimStatus
+	cancel        context.CancelFunc
+	mutex         sync.RWMutex
+	actualClaims  int
+	attemptCount  int
+	activeTasks   int         // 当前活跃的任务数
+	logCh         chan string // 用于非阻塞日志记录的通道
+	maxConcurrent int         // 最大并发任务数
 }
 
 // filterByKeywords 根据包含和排除关键词筛选任务
@@ -134,7 +142,7 @@ func NewAutoClaimer(config AutoClaimConfig) *AutoClaimer {
 		config.TaskType = "audittask"
 	}
 
-	if config.Interval < 0.1 {
+	if config.Interval < 0.001 {
 		config.Interval = 1.0
 	}
 
@@ -150,15 +158,15 @@ func NewAutoClaimer(config AutoClaimConfig) *AutoClaimer {
 		config.ConcurrentClaims = 10
 	}
 
-	// 初始化随机数种子
-	rand.Seed(time.Now().UnixNano())
+	maxConcurrent := max(config.ConcurrentClaims*2, 4) // 允许比单个任务的并发数更多的并发任务，最少4个
 
 	return &AutoClaimer{
 		config: config,
 		status: ClaimStatus{
 			IsActive: false,
 		},
-		logCh: make(chan string, 100), // 创建带缓冲的日志通道，避免阻塞
+		logCh:         make(chan string, 100), // 创建带缓冲的日志通道，避免阻塞
+		maxConcurrent: maxConcurrent,
 	}
 }
 
@@ -166,7 +174,13 @@ func NewAutoClaimer(config AutoClaimConfig) *AutoClaimer {
 func (ac *AutoClaimer) GetStatus() ClaimStatus {
 	ac.mutex.RLock()
 	defer ac.mutex.RUnlock()
-	return ac.status
+
+	// 创建状态副本并包含实时信息
+	status := ac.status
+	status.ActiveTasks = ac.activeTasks
+	status.AttemptCount = ac.attemptCount
+
+	return status
 }
 
 // Start 开始自动认领过程
@@ -182,9 +196,12 @@ func (ac *AutoClaimer) Start(ctx context.Context) error {
 	// 重置计数器
 	ac.actualClaims = 0
 	ac.attemptCount = 0
+	ac.activeTasks = 0
 	ac.status.SuccessfulClaims = 0
 	ac.status.LastError = ""
 	ac.status.LastResponse = nil
+	ac.status.ActiveTasks = 0
+	ac.status.AttemptCount = 0
 
 	// 创建一个带有取消功能的新上下文
 	ctxWithCancel, cancel := context.WithCancel(ctx)
@@ -211,10 +228,10 @@ func (ac *AutoClaimer) Stop() {
 	}
 }
 
-// autoClaimLoop 是自动认领过程的主循环
+// autoClaimLoop 是自动认领过程的主循环（不等待任务完成）
 func (ac *AutoClaimer) autoClaimLoop(ctx context.Context) {
-	// 立即执行初始认领尝试
-	ac.performAutoClaiming(ctx)
+	// 立即执行初始认领尝试（异步）
+	go ac.performAutoClaiming(ctx)
 
 	// 设置定时器进行周期性认领尝试
 	ticker := time.NewTicker(time.Duration(ac.config.Interval * float64(time.Second)))
@@ -232,28 +249,51 @@ func (ac *AutoClaimer) autoClaimLoop(ctx context.Context) {
 			}
 			return
 		case <-ticker.C:
-			// Time to attempt another claim
-			ac.performAutoClaiming(ctx)
+			// Time to attempt another claim - 异步执行，不等待完成
+			go ac.performAutoClaiming(ctx)
 		}
 	}
 }
 
-// performAutoClaiming 尝试根据配置认领任务
+// performAutoClaiming 尝试根据配置认领任务（异步执行）
 func (ac *AutoClaimer) performAutoClaiming(ctx context.Context) {
 	// Check if context is already cancelled
 	if ctx.Err() != nil {
 		return
 	}
 
+	// 检查并发限制
 	ac.mutex.Lock()
+	if ac.activeTasks >= ac.maxConcurrent {
+		ac.mutex.Unlock()
+		// 使用非阻塞方式发送日志消息
+		select {
+		case ac.logCh <- fmt.Sprintf("[%s] 跳过认领尝试：已达到最大并发数 (%d)", time.Now().Format("2006-01-02 15:04:05"), ac.activeTasks):
+		default:
+		}
+		return
+	}
+
+	ac.activeTasks++
 	ac.attemptCount++
 	attemptNum := ac.attemptCount
 	actualClaims := ac.actualClaims
 	ac.mutex.Unlock()
 
+	// 确保在函数退出时减少活跃任务数
+	defer func() {
+		ac.mutex.Lock()
+		ac.activeTasks--
+		ac.mutex.Unlock()
+	}()
+
 	// 使用非阻塞方式发送日志消息
+	ac.mutex.RLock()
+	currentActive := ac.activeTasks
+	ac.mutex.RUnlock()
+
 	select {
-	case ac.logCh <- fmt.Sprintf("[%s] 认领尝试 #%d 开始，当前认领数：%d/%d", time.Now().Format("2006-01-02 15:04:05"), attemptNum, actualClaims, ac.config.ClaimLimit):
+	case ac.logCh <- fmt.Sprintf("[%s] 认领尝试 #%d 开始，当前认领数：%d/%d，活跃任务：%d/%d", time.Now().Format("2006-01-02 15:04:05"), attemptNum, actualClaims, ac.config.ClaimLimit, currentActive, ac.maxConcurrent):
 		// 消息已发送到通道
 	default:
 		// 通道已满，但我们不想阻塞，所以忽略
@@ -288,7 +328,7 @@ func (ac *AutoClaimer) performAutoClaiming(ctx context.Context) {
 	}
 
 	// 尝试获取任务列表
-	options := map[string]interface{}{
+	options := map[string]any{
 		"pn":       pageNum,
 		"rn":       20,
 		"clueID":   "",
@@ -336,9 +376,9 @@ func (ac *AutoClaimer) performAutoClaiming(ctx context.Context) {
 	// 使用非阻塞方式发送日志消息
 	var filterMsg string
 	if ac.config.TaskType == "producetask" && (ac.config.StartTime != "" || ac.config.EndTime != "") {
-		filterMsg = fmt.Sprintf("（关键词+时间筛选）")
+		filterMsg = "（关键词+时间筛选）"
 	} else {
-		filterMsg = fmt.Sprintf("（关键词筛选）")
+		filterMsg = "（关键词筛选）"
 	}
 	select {
 	case ac.logCh <- fmt.Sprintf("[%s] 已筛选任务：%d/%d %s", time.Now().Format("2006-01-02 15:04:05"), len(filteredTasks), len(res.Data.List), filterMsg):
@@ -391,12 +431,9 @@ func (ac *AutoClaimer) performAutoClaiming(ctx context.Context) {
 	close(taskChan)
 
 	// 启动并发工作池
-	concurrentClaims := ac.config.ConcurrentClaims
-	if concurrentClaims > len(taskIDs) {
-		concurrentClaims = len(taskIDs)
-	}
+	concurrentClaims := min(ac.config.ConcurrentClaims, len(taskIDs))
 
-	for i := 0; i < concurrentClaims; i++ {
+	for range concurrentClaims {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -421,7 +458,7 @@ func (ac *AutoClaimer) performAutoClaiming(ctx context.Context) {
 
 					// 处理不同的响应格式
 					switch data := claimRes.Data.(type) {
-					case map[string]interface{}:
+					case map[string]any:
 						if success, ok := data["success"].(float64); ok {
 							taskSuccessCount = int(success)
 						}
@@ -519,6 +556,12 @@ func StartAutoClaiming(ctx context.Context, config AutoClaimConfig) (*AutoClaime
 
 	if config.Cookie == "" {
 		return nil, fmt.Errorf("cookie is required")
+	}
+
+	if config.Interval < 1 {
+		fmt.Printf("CLI接收到的Interval值为: %.3f秒 (%.0f毫秒)\n", config.Interval, config.Interval*1000)
+	} else {
+		fmt.Printf("CLI接收到的Interval值为: %.1f秒\n", config.Interval)
 	}
 
 	// 创建自动认领器

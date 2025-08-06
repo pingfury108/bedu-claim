@@ -15,6 +15,8 @@ export namespace main {
 	    ExcludeKeywords: string[];
 	    StartTime: string;
 	    EndTime: string;
+	    authType: string;
+	    authUsername: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new AutoClaimConfig(source);
@@ -36,6 +38,8 @@ export namespace main {
 	        this.ExcludeKeywords = source["ExcludeKeywords"];
 	        this.StartTime = source["StartTime"];
 	        this.EndTime = source["EndTime"];
+	        this.authType = source["authType"];
+	        this.authUsername = source["authUsername"];
 	    }
 	}
 	export class AutoClaimResponse {

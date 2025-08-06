@@ -27,6 +27,7 @@ export default function ClueClaimingComponent() {
   const [selectedType, setSelectedType] = useState('');
   const [claimLimit, setClaimLimit] = useState(10);
   const [refreshInterval, setRefreshInterval] = useState(1.0);
+  const [timeUnit, setTimeUnit] = useState<'seconds' | 'milliseconds'>('seconds');
   const [startTime, setStartTime] = useState('');
   const [endTime, setEndTime] = useState('');
   const [includeKeywords, setIncludeKeywords] = useState<string[]>([]);
@@ -42,6 +43,9 @@ export default function ClueClaimingComponent() {
   const [claimStatus, setClaimStatus] = useState<AutoClaimStatusType | null>(null);
   const [userInfo, setUserInfo] = useState<{ username: string; avatar: string } | null>(null);
   const [userInfoLoading, setUserInfoLoading] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [authType, setAuthType] = useState<'official' | 'custom'>('official');
+  const [authUsername, setAuthUsername] = useState('');
 
   const isUserInteractionRef = useRef(false);
   const statusIntervalRef = useRef<number | null>(null);
@@ -141,12 +145,13 @@ export default function ClueClaimingComponent() {
       const subjectItem = subjectFilter?.list.find(item => item.name === selectedSubject);
       const clueTypeItem = clueTypeFilter?.list.find(item => item.name === selectedType);
 
+  
       const config: main.AutoClaimConfig = {
         ServerBaseURL: '', // 已在Go代码中硬编码为 DefaultServerURL
         Cookie: cookie,
         TaskType: selectedTaskType,
         ClaimLimit: claimLimit,
-        Interval: refreshInterval,
+        Interval: timeUnit === 'seconds' ? refreshInterval : refreshInterval / 1000,
         MaxPages: 0,
         ConcurrentClaims: 10,
         StepID: stepItem?.id || 0,
@@ -156,6 +161,8 @@ export default function ClueClaimingComponent() {
         ExcludeKeywords: excludeKeywords,
         StartTime: startTime ? startTime.replace('T', ' ') + ':00' : '',
         EndTime: endTime ? endTime.replace('T', ' ') + ':00' : '',
+        authType: authType,
+        authUsername: authUsername,
       };
 
       const response = await StartAutoClaiming(config);
@@ -172,7 +179,7 @@ export default function ClueClaimingComponent() {
     } finally {
       setIsClaimingButtonLoading(false);
     }
-  }, [cookie, selectedTaskType, claimLimit, refreshInterval, filterData, selectedGrade, selectedSubject, selectedType, includeKeywords, excludeKeywords, startTime, endTime]);
+  }, [cookie, selectedTaskType, claimLimit, refreshInterval, filterData, selectedGrade, selectedSubject, selectedType, includeKeywords, excludeKeywords, startTime, endTime, authType, authUsername]);
 
   // 停止自动认领
   const stopAutoClaiming = useCallback(async () => {
@@ -242,10 +249,14 @@ export default function ClueClaimingComponent() {
     const savedCookie = localStorage.getItem('serverCookie') || '';
     const savedStartTime = localStorage.getItem('clueStartTime') || '';
     const savedEndTime = localStorage.getItem('clueEndTime') || '';
+    const savedAuthType = localStorage.getItem('authType') as 'official' | 'custom' || 'official';
+    const savedAuthUsername = localStorage.getItem('authUsername') || '';
 
     setCookie(savedCookie);
     setStartTime(savedStartTime);
     setEndTime(savedEndTime);
+    setAuthType(savedAuthType);
+    setAuthUsername(savedAuthUsername);
 
     // 如果已有cookie，获取用户信息
     if (savedCookie) {
@@ -260,6 +271,7 @@ export default function ClueClaimingComponent() {
     };
   }, [fetchUserInfo]);
 
+  
   // 当cookie或任务类型变化时加载标签数据
   useEffect(() => {
     if (cookie) {
@@ -269,11 +281,119 @@ export default function ClueClaimingComponent() {
 
   return (
     <div className="w-full mt-2">
+      {/* 授权设置弹窗 */}
+      {showAuthModal && (
+        <div className="modal modal-open">
+          <div className="modal-box max-w-md">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="font-bold text-lg">软件授权设置</h3>
+              <button
+                className="btn btn-sm btn-circle btn-ghost"
+                onClick={() => setShowAuthModal(false)}
+              >
+                ✕
+              </button>
+            </div>
+            
+            {/* 授权类型选择 */}
+            <div className="form-control mb-4">
+              <label className="label">
+                <span className="label-text font-medium">授权类型</span>
+              </label>
+              <div className="join w-full">
+                <button
+                  className={`btn join-item flex-1 ${authType === 'official' ? 'btn-primary' : 'btn-outline'}`}
+                  onClick={() => setAuthType('official')}
+                >
+                  官方授权
+                </button>
+                <button
+                  className={`btn join-item flex-1 ${authType === 'custom' ? 'btn-primary' : 'btn-outline'}`}
+                  onClick={() => setAuthType('custom')}
+                >
+                  定制授权
+                </button>
+              </div>
+            </div>
+
+            {/* 根据授权类型显示不同内容 */}
+            {authType === 'official' ? (
+              <div className="form-control">
+                <label className="label">
+                  <span className="label-text">用户名</span>
+                </label>
+                <input
+                  type="text"
+                  value={authUsername}
+                  onChange={(e) => setAuthUsername(e.target.value)}
+                  className="input input-bordered w-full"
+                  placeholder="请输入官方授权用户名"
+                />
+                <label className="label">
+                  <span className="label-text-alt text-info">
+                    请输入您的官方授权用户名进行验证
+                  </span>
+                </label>
+              </div>
+            ) : (
+              <div className="form-control">
+                <label className="label">
+                  <span className="label-text">当前用户</span>
+                </label>
+                <div className="input input-bordered w-full bg-base-200">
+                  {userInfo ? userInfo.username : '请先输入百度教育Cookie'}
+                </div>
+                <label className="label">
+                  <span className="label-text-alt text-info">
+                    使用百度教育Cookie关联的用户身份进行授权
+                  </span>
+                </label>
+              </div>
+            )}
+
+            {/* 弹窗底部按钮 */}
+            <div className="modal-action">
+              <button
+                className="btn btn-primary"
+                onClick={() => {
+                  // 保存授权设置到localStorage
+                  localStorage.setItem('authType', authType);
+                  localStorage.setItem('authUsername', authUsername);
+                  setShowAuthModal(false);
+                  showToast('授权设置已保存', 'success');
+                }}
+              >
+                保存设置
+              </button>
+              <button
+                className="btn btn-ghost"
+                onClick={() => setShowAuthModal(false)}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+          <div className="modal-backdrop">
+            <button onClick={() => setShowAuthModal(false)}>close</button>
+          </div>
+        </div>
+      )}
 
 
       {/* 筛选配置区域 */}
       <div className="flex flex-col gap-4 mb-4">
         <div className="form-control">
+          <div className="flex justify-between items-center mb-2">
+            <span className="label-text text-sm font-medium">软件授权</span>
+            <button
+              className="btn btn-outline btn-xs btn-primary"
+              onClick={() => {
+                    setShowAuthModal(true);
+                }}
+            >
+              设置授权
+            </button>
+          </div>
           <label className="label py-1 flex justify-between items-center">
             <span className="label-text text-sm font-medium">百度教育 Cookie</span>
             <div className="flex items-center gap-2">
@@ -408,9 +528,9 @@ export default function ClueClaimingComponent() {
               max="1000"
               value={claimLimit}
               onChange={(e) => setClaimLimit(Number(e.target.value))}
-              className="input input-bordered input-sm w-32 text-center"
+              className="input input-bordered input-sm w-24 text-center"
             />
-            <span className="text-sm">个</span>
+            <span className="text-sm w-18 text-center">个</span>
           </div>
         </div>
 
@@ -419,14 +539,30 @@ export default function ClueClaimingComponent() {
           <div className="flex items-center gap-2">
             <input
               type="number"
-              min="0.1"
-              max="60"
-              step="0.1"
+              min={timeUnit === 'seconds' ? "0.1" : "10"}
+              max={timeUnit === 'seconds' ? "60" : "60000"}
+              step={timeUnit === 'seconds' ? "0.1" : "10"}
               value={refreshInterval}
               onChange={(e) => setRefreshInterval(Number(e.target.value))}
-              className="input input-bordered input-sm w-32 text-center"
+              className="input input-bordered input-sm w-24 text-center"
             />
-            <span className="text-sm">秒</span>
+            <select
+              value={timeUnit}
+              onChange={(e) => {
+                const newUnit = e.target.value as 'seconds' | 'milliseconds';
+                setTimeUnit(newUnit);
+                // Convert value when switching units
+                if (newUnit === 'milliseconds' && timeUnit === 'seconds') {
+                  setRefreshInterval(refreshInterval * 1000);
+                } else if (newUnit === 'seconds' && timeUnit === 'milliseconds') {
+                  setRefreshInterval(refreshInterval / 1000);
+                }
+              }}
+              className="select select-bordered select-sm w-18"
+            >
+              <option value="seconds">秒</option>
+              <option value="milliseconds">毫秒</option>
+            </select>
           </div>
         </div>
       </div>
@@ -586,7 +722,7 @@ export default function ClueClaimingComponent() {
         {!autoClaimingActive && (
           <div className="mb-2 p-2 bg-base-200 rounded text-xs">
             <div className="font-medium mb-1">📋 当前设置:</div>
-            <div>任务类型: {selectedTaskType === 'producetask' ? '生产' : '审核'} | 上限: {claimLimit}个 | 间隔: {refreshInterval}秒</div>
+            <div>任务类型: {selectedTaskType === 'producetask' ? '生产' : '审核'} | 上限: {claimLimit}个 | 间隔: {refreshInterval}{timeUnit === 'seconds' ? '秒' : '毫秒'}</div>
             {(includeKeywords.length > 0 || excludeKeywords.length > 0) && (
               <div>
                 {includeKeywords.length > 0 && `包含: ${includeKeywords.join(', ')} `}
