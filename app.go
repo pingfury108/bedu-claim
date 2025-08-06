@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	DefaultServerURL = "https://easylearn.baidu.com"
-	UserAuthEndpoint = "http://127.0.0.1:8080/llm/test"
-	PocketBaseURL    = "https://pb.pingfury.top"
+	DefaultServerURL    = "https://easylearn.baidu.com"
+	UserAuthEndpoint    = "http://127.0.0.1:8080/llm/test"
+	PocketBaseURL       = "http://47.109.61.89:5913"
+	BackupPocketBaseURL = "https://pb.pingfury.top"
 )
 
 // App struct
@@ -313,45 +314,83 @@ func (a *App) validateOfficialAuth(username string) error {
 		return fmt.Errorf("用户名不能为空")
 	}
 
-	// 构建API URL
-	apiURL := fmt.Sprintf("%s/api/collections/baidu_edu_users/records/%s", PocketBaseURL, username)
-
-	// 创建HTTP请求
-	req, err := http.NewRequest("GET", apiURL, nil)
-	if err != nil {
-		return fmt.Errorf("创建请求失败: %v", err)
-	}
-
-	// 设置请求头
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-
-	// 发送请求
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("请求用户信息失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// 检查HTTP状态码
-	if resp.StatusCode == http.StatusNotFound {
-		return fmt.Errorf("用户不存在或无权使用")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("API请求失败: HTTP %d", resp.StatusCode)
-	}
-
-	// 读取响应体
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("读取响应失败: %v", err)
-	}
-
-	// 解析JSON响应
+	// 尝试主服务器和备用服务器
+	var lastErr error
 	var userResponse BaiduEduUserResponse
-	err = json.Unmarshal(body, &userResponse)
-	if err != nil {
-		return fmt.Errorf("解析响应失败: %v", err)
+	servers := []string{PocketBaseURL, BackupPocketBaseURL}
+	var success bool
+
+	for i, serverURL := range servers {
+		// 构建API URL
+		apiURL := fmt.Sprintf("%s/api/collections/baidu_edu_users/records/%s", serverURL, username)
+
+		// 创建HTTP请求
+		req, err := http.NewRequest("GET", apiURL, nil)
+		if err != nil {
+			lastErr = fmt.Errorf("创建请求失败: %v", err)
+			continue
+		}
+
+		// 设置请求头
+		req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+		// 发送请求，设置较短的超时时间
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("请求用户信息失败: %v", err)
+			if i < len(servers)-1 {
+				log.Printf("主服务器连接失败，尝试备用服务器: %v", err)
+				continue
+			}
+			return lastErr
+		}
+		defer resp.Body.Close()
+
+		// 检查HTTP状态码
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("用户不存在或无权使用")
+		}
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("API请求失败: HTTP %d", resp.StatusCode)
+			if i < len(servers)-1 {
+				log.Printf("主服务器返回错误，尝试备用服务器: HTTP %d", resp.StatusCode)
+				continue
+			}
+			return lastErr
+		}
+
+		// 读取响应体
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			lastErr = fmt.Errorf("读取响应失败: %v", err)
+			if i < len(servers)-1 {
+				log.Printf("读取响应失败，尝试备用服务器: %v", err)
+				continue
+			}
+			return lastErr
+		}
+
+		// 解析JSON响应
+		err = json.Unmarshal(body, &userResponse)
+		if err != nil {
+			lastErr = fmt.Errorf("解析响应失败: %v", err)
+			if i < len(servers)-1 {
+				log.Printf("解析响应失败，尝试备用服务器: %v", err)
+				continue
+			}
+			return lastErr
+		}
+
+		// 成功获取响应，跳出循环
+		log.Printf("成功连接到服务器: %s", serverURL)
+		success = true
+		break
+	}
+
+	// 如果所有服务器都尝试失败
+	if !success {
+		return lastErr
 	}
 
 	// PocketBase时间解析函数
